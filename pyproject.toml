@@ -6,6 +6,7 @@ authors = ["Harald Vohringer"]
 
 [tool.poetry.dependencies]
 python = "^3.8"
+numpyro = "^0.7.2"
 
 [tool.poetry.dev-dependencies]
 pytest = "^6.2.5"
