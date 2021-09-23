@@ -1,0 +1,8 @@
+[flake8]
+exclude =
+    docs/conf.py,
+
+per-file-ignores =
+    # line too long
+    cca/handler.py: E501,
+    cca/cca.py: E501, E203,

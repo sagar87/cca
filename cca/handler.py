@@ -1,17 +1,15 @@
 import functools
 import pickle
+from typing import Callable
 
 import jax.numpy as jnp
 import numpy as np
 from jax import lax, random
 from jax.experimental import host_callback
+from jax.numpy import DeviceArray
 from numpyro import optim
 from numpyro.diagnostics import hpdi
 from numpyro.infer import MCMC, NUTS, SVI, Predictive, Trace_ELBO
-
-from typing import Callable
-
-from jax.numpy import DeviceArray
 
 Model = Callable[[DeviceArray], DeviceArray]
 Guide = Callable[[DeviceArray], None]
@@ -72,6 +70,9 @@ class Posterior(object):
 
     def __setitem__(self, key, value):
         self.data[key] = value
+
+    def __call__(self, key):
+        return self.dist(key)
 
     def keys(self):
         return self.data.keys()
@@ -302,7 +303,12 @@ class NutsHandler(Handler):
         self.rng_key, self.rng_key_ = random.split(random.PRNGKey(rng_key))
         self.to_numpy = to_numpy
         self.kernel = NUTS(model, **kwargs)
-        self.mcmc = MCMC(self.kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains)
+        self.mcmc = MCMC(
+            self.kernel,
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            num_chains=num_chains,
+        )
 
     def predict(self, *args, **kwargs):
         predictive = Predictive(self.model, self.posterior.data, **kwargs)
