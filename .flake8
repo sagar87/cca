@@ -1,8 +1,11 @@
 [flake8]
-exclude =
-    docs/conf.py,
+ignore = E203,W503
+exclude = docs/conf.py
+max-line-length = 119
 
 per-file-ignores =
     # line too long
     cca/handler.py: E501,
     cca/cca.py: E501, E203,
+    cca/simulations.py: E501,
+    cca/plots/heatmap.py: E501

@@ -14,8 +14,12 @@ class CCA(Model):
         Y,
         num_latent_dim,
         horsehoe_prior=True,
-        factor_cov=2,
-        loading_cov=1,
+        factor_cov=0,
+        loading_cov=0,
+        z_scale=0.1,
+        z_prior=False,
+        α_conc=1e-3,
+        α_rate=1e-3,
         handler_kwargs={
             "handler": "SVI",
             "num_samples": 500,
@@ -28,8 +32,9 @@ class CCA(Model):
         self.Y = Y
         self.Y_c = np.concatenate(Y, 1)
 
-        self.α0 = 1e-9
-        self.β0 = 1e-9
+        # prior for gamma prior
+        self.α_conc = α_conc
+        self.α_rate = α_rate
 
         self.num_latent_dim = num_latent_dim
         self.num_modalities = len(Y)
@@ -39,6 +44,9 @@ class CCA(Model):
         self.horseshoe = horsehoe_prior
         self.factor_cov = factor_cov
         self.loading_cov = loading_cov
+
+        self.z_prior = z_prior
+        self.z_scale = z_scale
 
         self.identity = np.zeros((self.Y_c.shape[1], self.num_modalities))
 
@@ -51,7 +59,7 @@ class CCA(Model):
     def model(self):
         # ARD prior
         if self.horseshoe:
-            t = npy.sample("t", dist.HalfCauchy(scale=jnp.ones(self.num_modalities)))
+            τ = npy.sample("τ", dist.HalfCauchy(scale=jnp.ones(self.num_modalities)))
             λ = npy.sample(
                 "λ",
                 dist.HalfCauchy(
@@ -61,7 +69,7 @@ class CCA(Model):
             α = (
                 npy.deterministic(
                     "α",
-                    t.reshape(
+                    τ.reshape(
                         self.num_modalities,
                         1,
                         1,
@@ -71,14 +79,11 @@ class CCA(Model):
                 * jnp.ones((1, self.num_nodes, 1))
             )
         else:
-            #             α = npy.sample('α', dist.InverseGamma(
-            #                 jnp.tile(self.α0, (self.num_modalities, self.num_latent_dim)),
-            #                 jnp.tile(self.β0, (self.num_modalities, self.num_latent_dim))))
             α = npy.sample(
                 "α",
                 dist.InverseGamma(
-                    jnp.repeat(self.α0, self.num_modalities * self.num_latent_dim),
-                    jnp.repeat(self.β0, self.num_modalities * self.num_latent_dim),
+                    jnp.repeat(self.α_conc, self.num_modalities * self.num_latent_dim),
+                    jnp.repeat(self.α_rate, self.num_modalities * self.num_latent_dim),
                 ),
             )
 
@@ -87,7 +92,7 @@ class CCA(Model):
             ) * jnp.ones((1, self.num_nodes, 1))
 
         α_sd = jnp.einsum("ji,ikl->jkl", self.identity, α)
-        # W0 = npy.sample('W', dist.Normal(jnp.zeros((self.num_features, self.num_latent_dim)), 1.))
+
         if self.factor_cov == 2:
             W0 = npy.sample(
                 "W",
@@ -125,9 +130,7 @@ class CCA(Model):
                     ),
                 ),
             )
-            #             print(z[:2])
             z = z.T.reshape(self.num_latent_dim, self.num_nodes, self.num_cells)
-        #             print(z[...,0, :2])
         else:
             z = npy.sample(
                 "z",
@@ -137,32 +140,36 @@ class CCA(Model):
                 ),
             )
 
-        #         npy.deterministic('z', z)
+            if self.z_prior:
+                z_sigma = npy.sample(
+                    "z_sigma",
+                    dist.InverseGamma(
+                        jnp.repeat(self.z_scale, self.num_latent_dim * self.num_nodes),
+                        jnp.repeat(self.z_scale, self.num_latent_dim * self.num_nodes),
+                    ),
+                )
+
+                z = z * z_sigma.reshape(self.num_latent_dim, self.num_nodes, 1)
+
         Y_hat = jnp.einsum("ijk,kjm->jim", W, z)
 
-        #         τ = npy.sample('τ', dist.Gamma(
-        #             jnp.repeat(1., self.num_modalities),
-        #             jnp.repeat(1., self.num_modalities)))
+        σ = npy.sample("σ", dist.HalfCauchy(1.0))
+        σ = self.identity @ σ.reshape(-1, 1)
 
-        # #         _ = npy.deterministic('τ', τ)
-        #         τ_sd = self.identity @ (1. / jnp.sqrt(τ).reshape(-1, 1))
-        τ = npy.sample("τ", dist.HalfCauchy(1.0))
-        τ = self.identity @ τ.reshape(-1, 1)
-
-        _ = npy.sample("Y", dist.Normal(Y_hat, τ), obs=self.Y_c)
+        _ = npy.sample("Y", dist.Normal(Y_hat, σ), obs=self.Y_c)
 
     def guide(self):
         if self.horseshoe:
-            t_loc = npy.param("t_loc", jnp.zeros(self.num_modalities))
-            t_scale = npy.param(
-                "t_scale",
+            τ_loc = npy.param("τ_loc", jnp.zeros(self.num_modalities))
+            τ_scale = npy.param(
+                "τ_scale",
                 0.1 * jnp.eye(self.num_modalities),
                 constraint=dist.constraints.lower_cholesky,
             )
             npy.sample(
-                "t",
+                "τ",
                 dist.TransformedDistribution(
-                    dist.MultivariateNormal(t_loc, scale_tril=t_scale),
+                    dist.MultivariateNormal(τ_loc, scale_tril=τ_scale),
                     transforms=dist.transforms.ExpTransform(),
                 ),
             )
@@ -175,7 +182,6 @@ class CCA(Model):
                 0.1 * jnp.eye(self.num_modalities * self.num_latent_dim),
                 constraint=dist.constraints.lower_cholesky,
             )
-            # npy.sample('t', dist.HalfCauchy(scale=t_scale))
             npy.sample(
                 "λ",
                 dist.TransformedDistribution(
@@ -185,12 +191,6 @@ class CCA(Model):
             )
 
         else:
-            #             α_conc = npy.param('α_conc',
-            #                                jnp.tile(1., (self.num_modalities, self.num_latent_dim)),
-            #                                constraint=dist.constraints.positive)
-            #             α_rate = npy.param('α_rate',
-            #                                jnp.tile(1., (self.num_modalities, self.num_latent_dim)),
-            #                                constraint=dist.constraints.positive)
             α_loc = npy.param(
                 "α_loc", jnp.zeros(self.num_modalities * self.num_latent_dim)
             )
@@ -206,7 +206,6 @@ class CCA(Model):
                     transforms=dist.transforms.ExpTransform(),
                 ),
             )
-            # npy.sample('α', dist.InverseGamma(α_conc, α_rate))
 
         if self.factor_cov == 2:
             W_loc = npy.param(
@@ -239,22 +238,35 @@ class CCA(Model):
             )
             npy.sample("W", dist.Normal(W_loc, W_scale))
 
-        #         τ_conc = npy.param('τ_conc', jnp.repeat(1., self.num_modalities), constraint=dist.constraints.positive)
-        #         τ_rate = npy.param('τ_conc', jnp.repeat(1., self.num_modalities), constraint=dist.constraints.positive)
-        #         τ = npy.sample('τ', dist.Gamma(τ_conc, τ_rate))
-
-        τ_loc = npy.param("τ_loc", jnp.zeros(self.num_modalities))
-        τ_scale = npy.param(
-            "τ_scale",
+        σ_loc = npy.param("σ_loc", jnp.zeros(self.num_modalities))
+        σ_scale = npy.param(
+            "σ_scale",
             jnp.ones(self.num_modalities),
             constraint=dist.constraints.positive,
         )
         npy.sample(
-            "τ",
+            "σ",
             dist.TransformedDistribution(
-                dist.Normal(τ_loc, τ_scale), transforms=dist.transforms.ExpTransform()
+                dist.Normal(σ_loc, σ_scale), transforms=dist.transforms.ExpTransform()
             ),
         )
+
+        if self.z_prior:
+            z_sigma_loc = npy.param(
+                "z_sigma_loc", jnp.zeros(self.num_nodes * self.num_latent_dim)
+            )
+            z_sigma_scale = npy.param(
+                "z_sigma_scale",
+                0.1 * jnp.eye(self.num_nodes * self.num_latent_dim),
+                constraint=dist.constraints.lower_cholesky,
+            )
+            npy.sample(
+                "z_sigma",
+                dist.TransformedDistribution(
+                    dist.MultivariateNormal(z_sigma_loc, scale_tril=z_sigma_scale),
+                    transforms=dist.transforms.ExpTransform(),
+                ),
+            )
 
         if self.loading_cov == 1:
             z_loc = npy.param(
