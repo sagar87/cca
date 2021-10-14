@@ -7,19 +7,25 @@ from cca.handler import Model
 
 
 class CCA(Model):
-    _latent_variables = ["W", "z", "α", "τ"]
+    _latent_variables = ["W", "z", "α", "τ", "σ", "λ", "z_sigma", "z_scaled"]
 
     def __init__(
         self,
         Y,
         num_latent_dim,
-        horsehoe_prior=True,
-        factor_cov=0,
-        loading_cov=0,
+        factor_prior="horseshoe",
+        factor_cov=1,
+        loading_cov=1,
         z_scale=0.1,
         z_prior=False,
-        α_conc=1e-3,
-        α_rate=1e-3,
+        α_conc=1e-14,
+        α_rate=1e-14,
+        sigma_prior="half_cauchy",
+        fit_μ=False,
+        fit_τ=False,
+        λ_scale=1.0,
+        τ_scale=1.0,
+        noise_model="normal",
         handler_kwargs={
             "handler": "SVI",
             "num_samples": 500,
@@ -41,13 +47,22 @@ class CCA(Model):
         self.num_nodes = self.Y_c.shape[0]
         self.num_features = self.Y_c.shape[1]
         self.num_cells = self.Y_c.shape[2]
-        self.horseshoe = horsehoe_prior
+
+        self.factor_prior = factor_prior
         self.factor_cov = factor_cov
         self.loading_cov = loading_cov
 
         self.z_prior = z_prior
         self.z_scale = z_scale
+        self.τ_scale = τ_scale
+        self.λ_scale = λ_scale
 
+        self.fit_μ = fit_μ
+        self.fit_τ = fit_τ
+
+        self.sigma_prior = sigma_prior
+
+        self.noise_model = noise_model
         self.identity = np.zeros((self.Y_c.shape[1], self.num_modalities))
 
         j = 0
@@ -58,12 +73,22 @@ class CCA(Model):
 
     def model(self):
         # ARD prior
-        if self.horseshoe:
-            τ = npy.sample("τ", dist.HalfCauchy(scale=jnp.ones(self.num_modalities)))
+        if self.factor_prior == "horseshoe":
+            if self.fit_τ:
+                τ = npy.sample(
+                    "τ",
+                    dist.HalfCauchy(
+                        scale=jnp.repeat(self.τ_scale, self.num_modalities)
+                    ),
+                )
+            else:
+                τ = jnp.repeat(self.τ_scale, self.num_modalities)
             λ = npy.sample(
                 "λ",
                 dist.HalfCauchy(
-                    scale=jnp.ones(self.num_modalities * self.num_latent_dim)
+                    scale=jnp.repeat(
+                        self.λ_scale, self.num_modalities * self.num_latent_dim
+                    )
                 ),
             )
             α = (
@@ -78,7 +103,7 @@ class CCA(Model):
                 )
                 * jnp.ones((1, self.num_nodes, 1))
             )
-        else:
+        elif self.factor_prior == "inv_gamma":
             α = npy.sample(
                 "α",
                 dist.InverseGamma(
@@ -87,6 +112,7 @@ class CCA(Model):
                 ),
             )
 
+            # take the sqrt to convert variance to scale
             α = jnp.expand_dims(
                 jnp.sqrt(α.reshape(self.num_modalities, self.num_latent_dim)), 1
             ) * jnp.ones((1, self.num_nodes, 1))
@@ -149,17 +175,32 @@ class CCA(Model):
                     ),
                 )
 
-                z = z * z_sigma.reshape(self.num_latent_dim, self.num_nodes, 1)
+                z = npy.deterministic(
+                    "z_scaled",
+                    z * z_sigma.reshape(self.num_latent_dim, self.num_nodes, 1),
+                )
 
         Y_hat = jnp.einsum("ijk,kjm->jim", W, z)
 
-        σ = npy.sample("σ", dist.HalfCauchy(1.0))
+        if self.fit_μ:
+            μ = npy.param("μ", jnp.zeros((1, self.num_features, 1)))
+            Y_hat = Y_hat + μ
+
+        if self.sigma_prior == "half_cauchy":
+            σ = npy.sample("σ", dist.HalfCauchy(1.0))
+        elif self.sigma_prior == "inv_gamma":
+            σ = npy.sample("σ", dist.InverseGamma(1e-14, 1e-14))
+            σ = jnp.sqrt(σ)
+
         σ = self.identity @ σ.reshape(-1, 1)
 
-        _ = npy.sample("Y", dist.Normal(Y_hat, σ), obs=self.Y_c)
+        if self.noise_model == "normal":
+            _ = npy.sample("Y", dist.Normal(Y_hat, σ), obs=self.Y_c)
+        if self.noise_model == "poisson":
+            _ = npy.sample("Y", dist.Poisson(jnp.exp(Y_hat)), obs=self.Y_c)
 
     def guide(self):
-        if self.horseshoe:
+        if self.factor_prior == "horseshoe":
             τ_loc = npy.param("τ_loc", jnp.zeros(self.num_modalities))
             τ_scale = npy.param(
                 "τ_scale",
@@ -190,7 +231,7 @@ class CCA(Model):
                 ),
             )
 
-        else:
+        elif self.factor_prior == "inv_gamma":
             α_loc = npy.param(
                 "α_loc", jnp.zeros(self.num_modalities * self.num_latent_dim)
             )
@@ -238,6 +279,7 @@ class CCA(Model):
             )
             npy.sample("W", dist.Normal(W_loc, W_scale))
 
+        # scale of the modalities
         σ_loc = npy.param("σ_loc", jnp.zeros(self.num_modalities))
         σ_scale = npy.param(
             "σ_scale",
@@ -292,37 +334,46 @@ class CCA(Model):
             )
             npy.sample("z", dist.Normal(z_loc, z_scale))
 
+    def _extract_modality(self, array, modality):
+        if modality is None:
+            return array
+        else:
+            return array[:, self.identity[:, modality] == 1.0]
+
     def get_alpha(
         self,
     ):
-        α = self.posterior.dist("α")
-        if self.horseshoe:
+        α0 = self.posterior.dist("α")
+        α = jnp.expand_dims(α0.reshape(-1, self.num_modalities, self.num_latent_dim), 2)
+        if self.factor_prior == "horseshoe":
             return α
 
         return jnp.sqrt(α)
 
     def get_z(self):
-        z = self.posterior.dist("z")
+        if self.z_prior:
+            z = self.posterior.dist("z_scaled")
+        else:
+            z = self.posterior.dist("z")
         if self.loading_cov == 1:
             return np.rollaxis(
                 z.T.reshape(self.num_latent_dim, self.num_nodes, self.num_cells, -1), 3
             )
+
         return z
 
     def get_W(self, modality=None):
-        α0 = self.posterior.dist("α")
-        α = jnp.expand_dims(α0.reshape(-1, self.num_modalities, self.num_latent_dim), 2)
+        α = self.get_alpha()
         W0 = self.posterior.dist("W")
         W = jnp.expand_dims(
             W0.reshape(-1, self.num_features, self.num_latent_dim), 2
-        ) * jnp.einsum("ji,mikl->mjkl", self.identity, jnp.sqrt(α))
-        if modality is None:
-            return W
-        else:
-            return W[:, self.identity[:, modality] == 1.0]
+        ) * jnp.einsum("ji,mikl->mjkl", self.identity, α)
 
-    def get_Y(self):
-        z = self.get_z()
-        W = self.get_W()
+        return self._extract_modality(W, modality)
 
-        return jnp.einsum("nijk,nkjm->njim", W, z)
+    def get_Y(self, modality=None, subset=slice(None)):
+        z = self.get_z()[:, subset]
+        W = self.get_W()[..., subset]
+        Y = jnp.einsum("nijk,nkjm->nijm", W, z)
+
+        return self._extract_modality(Y, modality)

@@ -1,4 +1,5 @@
 import dataclasses
+from typing import Union
 
 import numpy as np
 import scipy.stats as stats
@@ -25,10 +26,15 @@ class Simulation:
     modalities: int = 2
     min_active_dims: int = 1
     max_active_dims: int = 10
+    offset: bool = False
+    sigma: Union[None, float] = None
 
     def __post_init__(self):
         np.random.seed(self.seed)
-        self.sigma = self._sigma()
+        if self.sigma is None:
+            self.sigma = self._sigma()
+        else:
+            self.sigma = [self.sigma for i in range(len(self.dims))]
 
         self.num_active_modalities = {}
         self.active_modalities = {}  #
@@ -37,6 +43,7 @@ class Simulation:
         self._set_active_dims()
         self._active_dims()
 
+        self.μ = self._μ()
         self.W = self._W()
         self.z = self._z()
         self.Y = self._Y()
@@ -79,7 +86,7 @@ class Simulation:
                 if m in self.active_modalities[l]:
                     W[m].append(stats.norm(0, 1).rvs(size=(self.dims[m])))
                 else:
-                    W[m].append(stats.norm(0, 0.001).rvs(size=(self.dims[m])))
+                    W[m].append(stats.norm(0, 0.00001).rvs(size=(self.dims[m])))
 
         W = [np.stack(v).T for k, v in W.items()]
         return W
@@ -97,6 +104,12 @@ class Simulation:
 
         return z
 
+    def _μ(self):
+        offsets = []
+        for m in range(self.modalities):
+            offsets.append(stats.uniform(-5, 15).rvs(self.dims[m]).reshape(1, -1, 1))
+        return offsets
+
     def _Y(self):
         Y = []
 
@@ -106,7 +119,13 @@ class Simulation:
                 .rvs(size=(self.dims[m] * self.cells * self.samples))
                 .reshape(self.samples, self.dims[m], self.cells)
             )
-            Y.append(np.einsum("ij,jlk->kil", self.W[m], self.z.T) + n)
+
+            EY = np.einsum("ij,jlk->kil", self.W[m], self.z.T)
+
+            if self.offset:
+                EY += self.μ[m]
+
+            Y.append(EY + n)
 
         return Y
 
@@ -132,9 +151,28 @@ class SimulationFunction(Simulation):
                 np.arange(len(F)), replace=False, size=self.num_active_latent_dims[s]
             )
             for i, d in zip(self.active_latent_dims[s], func_id):
-                z[s, :, d] = F[i](self.cells)
+                z[s, :, i] = F[d](self.cells)
 
         return z
+
+
+class PoissonSimulation(Simulation):
+    def _Y(self):
+        Y = []
+
+        for m in range(self.modalities):
+            EY = np.einsum("ij,jlk->kil", self.W[m], self.z.T)
+
+            if self.offset:
+                EY += self.μ[m]
+
+            obs = stats.poisson(np.exp(EY)).rvs()
+            if obs.ndim == 2:
+                obs = np.expand_dims(obs, 0)
+
+            Y.append(obs)
+
+        return Y
 
 
 # @dataclasses.dataclass
