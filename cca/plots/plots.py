@@ -37,9 +37,43 @@ def plot_matched_factor(sim, model, figsize=(6, 12), fill_array=False):
     ax[m, -1].set_xlabel("Factor")
 
 
+def plot_factor_bar(sim):
+    fig, axes = plt.subplots(
+        sim.modalities,
+        sim.latent_dim,
+        figsize=(sim.latent_dim * 3, sim.modalities * 2),
+        sharey=True,
+    )
+
+    for i in range(sim.modalities * sim.latent_dim):
+        j, k = np.unravel_index(i, (sim.modalities, sim.latent_dim))
+        axes[j, k].bar(np.arange(sim.dims[j]), sim.W[j][:, k])
+
+    return fig, axes
+
+
+def plot_matched_factor_bar(sim, model, flip=[]):
+    fig, axes = plt.subplots(
+        sim.modalities,
+        sim.latent_dim,
+        figsize=(sim.latent_dim * 4, sim.modalities * 2),
+        sharey=True,
+    )
+    idx, _ = sim.match_factors(model, fill_array=False)
+
+    for i in range(sim.modalities * sim.latent_dim):
+        j, k = np.unravel_index(i, (sim.modalities, sim.latent_dim))
+        axes[j, k].bar(np.arange(sim.dims[j]) - 0.15, sim.W[j][:, k], width=0.3)
+        y = np.median(model.get_W(j).squeeze()[..., idx], 0)[..., k]
+        if k in flip:
+            y *= -1
+        axes[j, k].bar(np.arange(sim.dims[j]) + 0.15, y, width=0.3)
+        axes[j, k].margins(x=0.01)
+
+
 def plot_sample(sim, idx=0, figsize=(8, 5)):
     fig, ax = plt.subplots(sim.latent_dim, 1, figsize=figsize)
-    # S1.z[1].T
+    # sim.z[1].T
     ax[0].set_title(f"Sample: {idx}")
     for d in range(sim.latent_dim):
         # sns.heatmap(sim.W[m], cmap='RdBu', vmin=-2, vmax=2, ax=ax[m])
@@ -107,3 +141,18 @@ def plot_lambda(model):
             axes[j, i].hist(L[:, j, i])
 
     return fig, axes
+
+
+def plot_matched_data(sim, model):
+    med = np.median(model.get_Y(), 0).reshape(-1, 1)
+    q = np.quantile(model.get_Y(), [0.025, 0.975], 0).reshape(2, -1).T
+    ci = np.abs(q - med)
+    identity = np.linspace(np.min(med), np.max(med))
+    plt.errorbar(
+        np.concatenate(sim.Y, 1).swapaxes(0, 1).reshape(-1),
+        med.reshape(-1),
+        yerr=ci.T,
+        fmt=".",
+        alpha=0.2,
+    )
+    plt.plot(identity, identity, zorder=100)

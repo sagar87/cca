@@ -15,9 +15,9 @@ class CCA(Model):
         num_latent_dim,
         factor_prior="horseshoe",
         factor_cov=1,
-        loading_cov=1,
+        loading_cov=0,
         z_scale=0.1,
-        z_prior=False,
+        z_prior=True,
         α_conc=1e-14,
         α_rate=1e-14,
         sigma_prior="half_cauchy",
@@ -186,13 +186,14 @@ class CCA(Model):
             μ = npy.param("μ", jnp.zeros((1, self.num_features, 1)))
             Y_hat = Y_hat + μ
 
-        if self.sigma_prior == "half_cauchy":
-            σ = npy.sample("σ", dist.HalfCauchy(1.0))
-        elif self.sigma_prior == "inv_gamma":
-            σ = npy.sample("σ", dist.InverseGamma(1e-14, 1e-14))
-            σ = jnp.sqrt(σ)
+        if self.noise_model == "normal":
+            if self.sigma_prior == "half_cauchy":
+                σ = npy.sample("σ", dist.HalfCauchy(1.0))
+            elif self.sigma_prior == "inv_gamma":
+                σ = npy.sample("σ", dist.InverseGamma(1e-14, 1e-14))
+                σ = jnp.sqrt(σ)
 
-        σ = self.identity @ σ.reshape(-1, 1)
+            σ = self.identity @ σ.reshape(-1, 1)
 
         if self.noise_model == "normal":
             _ = npy.sample("Y", dist.Normal(Y_hat, σ), obs=self.Y_c)
@@ -254,7 +255,7 @@ class CCA(Model):
             )
             W_scale = npy.param(
                 "W_scale",
-                jnp.eye(self.num_features * self.num_latent_dim),
+                0.1 * jnp.eye(self.num_features * self.num_latent_dim),
                 constraint=dist.constraints.lower_cholesky,
             )
             npy.sample("W", dist.MultivariateNormal(W_loc, scale_tril=W_scale))
@@ -264,7 +265,7 @@ class CCA(Model):
             )
             W_scale = npy.param(
                 "W_scale",
-                jnp.stack(self.num_latent_dim * [jnp.eye(self.num_features)]),
+                0.1 * jnp.stack(self.num_latent_dim * [jnp.eye(self.num_features)]),
                 constraint=dist.constraints.lower_cholesky,
             )
             npy.sample("W", dist.MultivariateNormal(W_loc, scale_tril=W_scale))
@@ -274,24 +275,26 @@ class CCA(Model):
             )
             W_scale = npy.param(
                 "W_scale",
-                jnp.ones((self.num_features, self.num_latent_dim)),
+                0.1 * jnp.ones((self.num_features, self.num_latent_dim)),
                 constraint=dist.constraints.positive,
             )
             npy.sample("W", dist.Normal(W_loc, W_scale))
 
         # scale of the modalities
-        σ_loc = npy.param("σ_loc", jnp.zeros(self.num_modalities))
-        σ_scale = npy.param(
-            "σ_scale",
-            jnp.ones(self.num_modalities),
-            constraint=dist.constraints.positive,
-        )
-        npy.sample(
-            "σ",
-            dist.TransformedDistribution(
-                dist.Normal(σ_loc, σ_scale), transforms=dist.transforms.ExpTransform()
-            ),
-        )
+        if self.noise_model == "normal":
+            σ_loc = npy.param("σ_loc", jnp.zeros(self.num_modalities))
+            σ_scale = npy.param(
+                "σ_scale",
+                jnp.ones(self.num_modalities),
+                constraint=dist.constraints.positive,
+            )
+            npy.sample(
+                "σ",
+                dist.TransformedDistribution(
+                    dist.Normal(σ_loc, σ_scale),
+                    transforms=dist.transforms.ExpTransform(),
+                ),
+            )
 
         if self.z_prior:
             z_sigma_loc = npy.param(
@@ -317,7 +320,8 @@ class CCA(Model):
             )
             z_scale = npy.param(
                 "z_scale",
-                jnp.stack(
+                0.1
+                * jnp.stack(
                     [jnp.eye(self.num_latent_dim)] * self.num_nodes * self.num_cells
                 ),
                 constraint=dist.constraints.lower_cholesky,
@@ -330,7 +334,7 @@ class CCA(Model):
             )
             z_scale = npy.param(
                 "z_scale",
-                jnp.ones((self.num_latent_dim, self.num_nodes, self.num_cells)),
+                0.1 * jnp.ones((self.num_latent_dim, self.num_nodes, self.num_cells)),
             )
             npy.sample("z", dist.Normal(z_loc, z_scale))
 
@@ -375,5 +379,7 @@ class CCA(Model):
         z = self.get_z()[:, subset]
         W = self.get_W()[..., subset]
         Y = jnp.einsum("nijk,nkjm->nijm", W, z)
+        if self.noise_model == "poisson":
+            Y = np.exp(Y)
 
         return self._extract_modality(Y, modality)
