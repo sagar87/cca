@@ -9,7 +9,13 @@ from numpyro import optim
 from numpyro.diagnostics import hpdi
 from numpyro.infer import MCMC, NUTS, SVI, Predictive, Trace_ELBO
 
-from genomicsurveillance.types import Guide, Model
+# type declarations
+from typing import Callable
+
+from jax.numpy import DeviceArray
+
+Model = Callable[[DeviceArray], DeviceArray]
+Guide = Callable[[DeviceArray], None]
 
 
 def ignore_unhashable(func):
