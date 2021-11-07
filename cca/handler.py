@@ -1,18 +1,15 @@
 import functools
 import pickle
-from typing import Callable
 
 import jax.numpy as jnp
 import numpy as np
 from jax import lax, random
 from jax.experimental import host_callback
-from jax.numpy import DeviceArray
 from numpyro import optim
 from numpyro.diagnostics import hpdi
 from numpyro.infer import MCMC, NUTS, SVI, Predictive, Trace_ELBO
 
-Model = Callable[[DeviceArray], DeviceArray]
-Guide = Callable[[DeviceArray], None]
+from genomicsurveillance.types import Guide, Model
 
 
 def ignore_unhashable(func):
@@ -53,6 +50,7 @@ def make_array(arg):
 class Posterior(object):
     """
     Caches a posterior.
+
     :param posterior: the posterior distribution
     """
 
@@ -70,9 +68,6 @@ class Posterior(object):
 
     def __setitem__(self, key, value):
         self.data[key] = value
-
-    def __call__(self, key):
-        return self.dist(key)
 
     def keys(self):
         return self.data.keys()
@@ -167,10 +162,12 @@ class SVIHandler(Handler):
     """
     Helper object that abstracts some of numpyros complexities. Inspired
     by an implementation of Florian Wilhelm.
+
     :param model: A numpyro model.
     :param guide: A numpyro guide.
     :param loss: Loss function, defaults to Trace_ELBO.
-    :param lr: Learning rate, defaults to 0.01.
+    :param lr: Learning rate, defaults to 0.001.
+    :param lrd: Learning rate decay per step, defaults to 1.0 (no decay)
     :param rng_key: Random seed, defaults to 254.
     :param num_epochs: Number of epochs to train the model, defaults to 5000.
     :param num_samples: Number of posterior samples.
@@ -185,8 +182,9 @@ class SVIHandler(Handler):
         model: Model,
         guide: Guide,
         loss: Trace_ELBO = Trace_ELBO(num_particles=1),
-        optimizer: optim.optimizers.optimizer = optim.Adam,
+        optimizer: optim.optimizers.optimizer = optim.ClippedAdam,
         lr: float = 0.001,
+        lrd: float = 1.0,
         rng_key: int = 254,
         num_epochs: int = 30000,
         num_samples: int = 1000,
@@ -197,7 +195,7 @@ class SVIHandler(Handler):
         self.model = model
         self.guide = guide
         self.loss = loss
-        self.optimizer = optimizer(step_size=lr)
+        self.optimizer = optimizer(step_size=lambda x: lr * lrd**x)
         self.rng_key = random.PRNGKey(rng_key)
 
         self.svi = SVI(self.model, self.guide, self.optimizer, loss=self.loss)
@@ -303,12 +301,7 @@ class NutsHandler(Handler):
         self.rng_key, self.rng_key_ = random.split(random.PRNGKey(rng_key))
         self.to_numpy = to_numpy
         self.kernel = NUTS(model, **kwargs)
-        self.mcmc = MCMC(
-            self.kernel,
-            num_warmup=num_warmup,
-            num_samples=num_samples,
-            num_chains=num_chains,
-        )
+        self.mcmc = MCMC(self.kernel, num_warmup, num_samples, num_chains=num_chains)
 
     def predict(self, *args, **kwargs):
         predictive = Predictive(self.model, self.posterior.data, **kwargs)
